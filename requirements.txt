@@ -1,3 +1,6 @@
+git+https://github.com/MPI-IS/mesh.git
+git+https://github.com/vchoutas/torch-trust-ncg.git
+
 numpy>=1.16.2
 torch>=1.0.1.post2
 dataclasses>=0.6
