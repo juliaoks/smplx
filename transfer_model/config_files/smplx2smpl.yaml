@@ -1,7 +1,7 @@
 datasets:
     mesh_folder:
-        data_folder: 'meshes/smplx'
-deformation_transfer_path: 'transfer_data/smplx2smpl_deftrafo_setup.pkl'
+        data_folder: '/home/mmc-user/smplx/transfer_data/meshes/amass_sample'
+deformation_transfer_path: '/home/mmc-user/smplx/transfer_data/smplx2smpl_deftrafo_setup.pkl'
 mask_ids_fname: ''
 summary_steps: 100
 
@@ -17,7 +17,7 @@ body_model:
     model_type: "smpl"
     gender: "neutral"
     ext: 'pkl'
-    folder: "transfer_data/body_models"
+    folder: "/home/mmc-user/smplx/models"
     use_compressed: False
     use_face_contour: True
     smpl:

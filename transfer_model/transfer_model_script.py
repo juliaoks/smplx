@@ -23,12 +23,12 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from loguru import logger
-from .utils import get_vertices_per_edge
+from utils import get_vertices_per_edge
 
-from .optimizers import build_optimizer, minimize
-from .utils import (
+from optimizers import build_optimizer, minimize
+from utils import (
     Tensor, batch_rodrigues, apply_deformation_transfer)
-from .losses import build_loss
+from losses import build_loss
 
 
 def summary_closure(gt_vertices, var_dict, body_model, mask_ids=None):

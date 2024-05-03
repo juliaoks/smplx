@@ -48,8 +48,8 @@ def main(
     if "betas" in motion:
         betas = motion["betas"]
     else:
-        betas = np.zeros((num_betas,))
-    num_betas = len(betas)
+        betas = np.zeros((1, num_betas,))
+    num_betas = betas.shape[-1]
     print(f"{num_betas=}")
 
     if "gender" in motion:
@@ -70,7 +70,7 @@ def main(
     )
 
     betas, expression = torch.tensor(betas).float(), None
-    betas = betas.unsqueeze(0)[:, : model.num_betas]
+    # betas = betas.unsqueeze(0)[:, : model.num_betas]
 
     if "poses" in motion:
         poses = torch.tensor(motion["poses"]).float()
@@ -84,7 +84,7 @@ def main(
         poses = torch.tensor(poses.reshape(n, -1)).float()
 
     if "global_orient" in motion:
-        global_orient = motion["global_orient"]
+        global_orient = torch.tensor(motion["global_orient"]).float()
     else:
         global_orient = poses[:, :3]
 
@@ -111,10 +111,10 @@ def main(
     #     expression = torch.randn(
     #         [1, model.num_expression_coeffs], dtype=torch.float32)
 
-    for pose_idx in range(body_pose.shape[0]):
+    for pose_idx in tqdm(range(body_pose.shape[0])):
         pose_idx = [pose_idx]
         output = model(
-            betas=betas,
+            betas=betas[pose_idx],
             global_orient=global_orient[pose_idx],
             body_pose=body_pose[pose_idx],
             left_hand_pose=left_hand_pose[pose_idx],

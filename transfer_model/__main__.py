@@ -27,10 +27,10 @@ from tqdm import tqdm
 
 from smplx import build_layer
 
-from .config import parse_args
-from .data import build_dataloader
-from .transfer_model import run_fitting
-from .utils import read_deformation_transfer, np_mesh_to_o3d
+from config import parse_args
+from data import build_dataloader
+from transfer_model_script import run_fitting
+from utils import read_deformation_transfer, np_mesh_to_o3d
 
 
 def main() -> None:
@@ -44,6 +44,7 @@ def main() -> None:
             if input("use_cuda=True and GPU is not available, using CPU instead,"
                      " would you like to continue? (y/n)") != "y":
                 sys.exit(3)
+    print(f"{device=}")
 
     logger.remove()
     logger.add(

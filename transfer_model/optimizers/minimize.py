@@ -19,6 +19,10 @@ import torch
 from loguru import logger
 from tqdm import tqdm
 
+import sys
+import os
+sys.path.insert(0, "/home/mmc-user/smplx/")
+
 from transfer_model.utils import (
     from_torch, Tensor, Array, rel_change)
 
