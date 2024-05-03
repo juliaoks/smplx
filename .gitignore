@@ -107,3 +107,8 @@ venv.bak/
 # mypy
 .mypy_cache/
 
+# ignore data files
+*.obj
+*.pkl
+*.npz
+*.npy
