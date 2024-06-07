@@ -16,68 +16,174 @@
 
 import os.path as osp
 import argparse
+import pickle
 
 import numpy as np
 import torch
 
 import smplx
 
+import math
+
+from utils import extract_gt_full, rotate_joint, extract_val
 
 def main(model_folder,
          model_type='smplx',
          ext='npz',
          gender='neutral',
-         plot_joints=False,
+         plot_joints=True,
          num_betas=10,
          sample_shape=True,
          sample_expression=True,
          num_expression_coeffs=10,
          plotting_module='pyrender',
-         use_face_contour=False):
+         use_face_contour=False,
+         extract="gt",
+         rot_fp=None,
+         ):
 
     model = smplx.create(model_folder, model_type=model_type,
                          gender=gender, use_face_contour=use_face_contour,
                          num_betas=num_betas,
                          num_expression_coeffs=num_expression_coeffs,
-                         ext=ext)
-    print(model)
+                         ext=ext, use_pca=False)
 
-    betas, expression = None, None
-    if sample_shape:
-        betas = torch.randn([1, model.num_betas], dtype=torch.float32)
-    if sample_expression:
-        expression = torch.randn(
-            [1, model.num_expression_coeffs], dtype=torch.float32)
+    if extract == "gt":
+        # bd_pose = rotate_joint(bd_pose, 16)
 
-    output = model(betas=betas, expression=expression,
-                   return_verts=True)
-    vertices = output.vertices.detach().cpu().numpy().squeeze()
-    joints = output.joints.detach().cpu().numpy().squeeze()
+        (transl, global_orient, expression, body_pose,
+            betas, left_hand_pose, right_hand_pose) = extract_gt_full(rot_fp)
 
-    print('Vertices shape =', vertices.shape)
-    print('Joints shape =', joints.shape)
+        output = model(
+            betas=betas,
+            expression=expression,
+            return_verts=True,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            transl=transl,
+            plot_joints=False,
+            left_hand_pose=left_hand_pose,
+            use_pca=False,
+            right_hand_pose=right_hand_pose,
+        )
+        output = [output]
+        joints = output.joints.detach().cpu().numpy().squeeze()
+        print("lhip, lknee, lankle ->\n", joints[[1, 4, 7]], "\n") # lhip, lknee, lankle
+        print("left_hip, pelvis, right_hip ->\n", joints[[1, 0, 2]], "\n")
+        print("left_shoulder, left_elbow, left_wrist ->\n", joints[[16, 18, 20]], "\n")
+
+    elif extract == "val":
+        # fr_id = 43789
+        fr_id = 160
+        (go_pred, go_gt), (bp_pred, bp_gt), (lh_pred, lh_gt), (rh_pred, rh_gt) = extract_val(rot_fp, fr_id)
+
+        global_orient, body_pose = go_gt, bp_gt
+        left_hand_pose, right_hand_pose = lh_gt, rh_gt
+
+        betas, expression = None, None
+        output_gt = model(
+            betas=betas,
+            expression=expression,
+            return_verts=True,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            plot_joints=False,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+        )
+
+        global_orient, body_pose = go_pred, bp_pred
+        left_hand_pose, right_hand_pose = lh_pred, rh_pred
+
+        output_pred = model(
+            betas=betas,
+            expression=expression,
+            return_verts=True,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            plot_joints=False,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+        )
+        output = [output_gt, output_pred]
+    else:
+        betas, expression = None, None
+        if sample_shape:
+            betas = torch.randn([1, model.num_betas], dtype=torch.float32)
+        if sample_expression:
+            expression = torch.randn(
+                [1, model.num_expression_coeffs], dtype=torch.float32)
+
+        output = model(betas=betas, expression=expression,
+                   return_verts=True, plot_joints=True)
+        output = [output]
 
     if plotting_module == 'pyrender':
         import pyrender
         import trimesh
-        vertex_colors = np.ones([vertices.shape[0], 4]) * [0.3, 0.3, 0.3, 0.8]
-        tri_mesh = trimesh.Trimesh(vertices, model.faces,
-                                   vertex_colors=vertex_colors)
 
-        mesh = pyrender.Mesh.from_trimesh(tri_mesh)
+        tx, ty, tz = 0, -0.5, 1.8
+        rot_rad = np.deg2rad(0)
+        translation_matrix = np.array([
+            [1, 0, 0, tx],
+            [0, 1, 0, ty],
+            [0, 0, 1, tz],
+            [0, 0, 0, 1]
+        ])
+        rot_matrix = np.array([
+            [np.cos(rot_rad), 0, np.sin(rot_rad), 0],
+            [0, 1, 0, 0],
+            [-np.sin(rot_rad), 0, np.cos(rot_rad), 0],
+            [0, 0, 0, 1]
+        ])
+        # cam_pose = np.array([[1, 0, 0, 0],
+        #                         [0, 1, 0, -.5],
+        #                         [0, 0, 1, 1.8],
+        #                         [0, 0, 0, 1]])
+        cam_pose = np.dot(translation_matrix, rot_matrix)
 
-        scene = pyrender.Scene()
-        scene.add(mesh)
+        # prepare camera and light
+        light = pyrender.DirectionalLight(color=np.ones(3), intensity=2.0)
+        camera = pyrender.OrthographicCamera(xmag=0.05, ymag=0.5)
 
-        if plot_joints:
-            sm = trimesh.creation.uv_sphere(radius=0.005)
-            sm.visual.vertex_colors = [0.9, 0.1, 0.1, 1.0]
-            tfs = np.tile(np.eye(4), (len(joints), 1, 1))
-            tfs[:, :3, 3] = joints
-            joints_pcl = pyrender.Mesh.from_trimesh(sm, poses=tfs)
-            scene.add(joints_pcl)
+        scene = pyrender.Scene(
+            # bg_color=[0.6, 0.6, 0.6, 0.1],
+            # ambient_light=(0.3, 0.3, 0.3)
+        )
+        scene.add(camera, pose=cam_pose)
+        scene.add(light, pose=cam_pose)
 
-        pyrender.Viewer(scene, use_raymond_lighting=True)
+        name = ["Ground Truth", "Predict"]
+        colors = [[50, 245, 39, 0.5], [245, 39, 243, 0.5]]
+        for idx, out in enumerate(output):
+            if len(output) > 1:
+                print(f"{idx=} {name[idx]}")
+
+            # idx = idx + 1
+            vertices = out.vertices.detach().cpu().numpy().squeeze()
+            joints = out.joints.detach().cpu().numpy().squeeze()
+
+            # vertex_colors = np.ones([vertices.shape[0], 4]) * [0.3 * idx, 0.3, 0.3, 0.5]
+            vertex_colors = np.array(colors[idx])
+            vertex_colors[:3] = vertex_colors[:3] / 255
+            tri_mesh = trimesh.Trimesh(vertices, model.faces,
+                                    vertex_colors=vertex_colors,
+                                    process=False)
+
+            mesh = pyrender.Mesh.from_trimesh(tri_mesh,)
+            scene.add(mesh, 'mesh')
+
+            if plot_joints:
+                sm = trimesh.creation.uv_sphere(radius=0.009)
+                vertex_colors[-1] = 1.0
+                sm.visual.vertex_colors = vertex_colors
+                tfs = np.tile(np.eye(4), (26, 1, 1))
+                tfs[:22, :3, 3] = joints[:22]
+                tfs[22:, :3, 3] = joints[[27, 42, 33, 48]]
+                joints_pcl = pyrender.Mesh.from_trimesh(sm, poses=tfs)
+                scene.add(joints_pcl)
+
+        pyrender.Viewer(scene, use_raymond_lighting=True, viewer_flags=dict(show_mesh_axes=True))
     elif plotting_module == 'matplotlib':
         from matplotlib import pyplot as plt
         from mpl_toolkits.mplot3d import Axes3D
@@ -122,8 +228,8 @@ def main(model_folder,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SMPL-X Demo')
 
-    parser.add_argument('--model-folder', required=True, type=str,
-                        help='The path to the model folder')
+    # parser.add_argument('--model-folder', required=True, type=str,
+    #                     help='The path to the model folder')
     parser.add_argument('--model-type', default='smplx', type=str,
                         choices=['smpl', 'smplh', 'smplx', 'mano', 'flame'],
                         help='The type of model to load')
@@ -156,11 +262,16 @@ if __name__ == '__main__':
                         type=lambda arg: arg.lower() in ['true', '1'],
                         help='Compute the contour of the face')
 
+    parser.add_argument("--extract", type=str,)
+    parser.add_argument("--rot-fp", type=str,)
+
     args = parser.parse_args()
 
-    model_folder = osp.expanduser(osp.expandvars(args.model_folder))
+    model_folder = "/Users/yuliiaoks/Documents/uni_aux/master/models/"
+
+    # model_folder = osp.expanduser(osp.expandvars(args.model_folder))
     model_type = args.model_type
-    plot_joints = args.plot_joints
+    plot_joints = True
     use_face_contour = args.use_face_contour
     gender = args.gender
     ext = args.ext
@@ -169,6 +280,8 @@ if __name__ == '__main__':
     num_expression_coeffs = args.num_expression_coeffs
     sample_shape = args.sample_shape
     sample_expression = args.sample_expression
+    extract = args.extract
+    rot_fp = args.rot_fp
 
     main(model_folder, model_type, ext=ext,
          gender=gender, plot_joints=plot_joints,
@@ -177,4 +290,7 @@ if __name__ == '__main__':
          sample_shape=sample_shape,
          sample_expression=sample_expression,
          plotting_module=plotting_module,
-         use_face_contour=use_face_contour)
+         use_face_contour=use_face_contour,
+         extract=extract,
+         rot_fp=rot_fp,
+         )
