@@ -25,7 +25,10 @@ import smplx
 
 import math
 
-from utils import extract_gt_full, rotate_joint, extract_val
+from pytorch3d import transforms
+
+# from utils import extract_gt_full, rotate_joint, extract_val, load_data, flip_pose
+from utils import *
 
 def main(model_folder,
          model_type='smplx',
@@ -40,6 +43,7 @@ def main(model_folder,
          use_face_contour=False,
          extract="gt",
          rot_fp=None,
+         flip_gt=False,
          ):
 
     model = smplx.create(model_folder, model_type=model_type,
@@ -71,11 +75,14 @@ def main(model_folder,
         print("lhip, lknee, lankle ->\n", joints[[1, 4, 7]], "\n") # lhip, lknee, lankle
         print("left_hip, pelvis, right_hip ->\n", joints[[1, 0, 2]], "\n")
         print("left_shoulder, left_elbow, left_wrist ->\n", joints[[16, 18, 20]], "\n")
+    elif extract == "val" and flip_gt:
+        fr_id = 0
+        print(f"Frame Id={fr_id}")
+        _, gt = load_data(rot_fp, fr_id)
 
-    elif extract == "val":
-        # fr_id = 43789
-        fr_id = 160
-        (go_pred, go_gt), (bp_pred, bp_gt), (lh_pred, lh_gt), (rh_pred, rh_gt) = extract_val(rot_fp, fr_id)
+        if flip_gt:
+            flip_gt = flip_pose(gt)
+        (go_pred, go_gt), (bp_pred, bp_gt), (lh_pred, lh_gt), (rh_pred, rh_gt) = extract_val(flip_gt, gt)
 
         global_orient, body_pose = go_gt, bp_gt
         left_hand_pose, right_hand_pose = lh_gt, rh_gt
@@ -106,17 +113,182 @@ def main(model_folder,
             right_hand_pose=right_hand_pose,
         )
         output = [output_gt, output_pred]
+    elif extract == "val":
+        # fr_id = 43789
+        fr_id = 37620
+        # fr_id = 110
+        print(f"Frame Id={fr_id}")
+        # fr_id = 160
+        pred, gt, betas = load_data(rot_fp, fr_id)
+        betas = torch.from_numpy(betas).unsqueeze(0)
+
+        if flip_gt:
+            gt = flip_pose(gt)
+
+        (go_pred, go_gt), (bp_pred, bp_gt), (lh_pred, lh_gt), (rh_pred, rh_gt) = extract_val(pred, gt)
+
+        global_orient, body_pose = go_gt, bp_gt
+        left_hand_pose, right_hand_pose = lh_gt, rh_gt
+
+        expression = None
+        output_gt = model(
+            betas=betas,
+            expression=expression,
+            return_verts=True,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            plot_joints=False,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+        )
+
+        global_orient, body_pose = go_pred, bp_pred
+        left_hand_pose, right_hand_pose = lh_pred, rh_pred
+
+        output_pred = model(
+            betas=betas,
+            expression=expression,
+            return_verts=True,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            plot_joints=False,
+            left_hand_pose=left_hand_pose,
+            right_hand_pose=right_hand_pose,
+        )
+        output = [output_gt, output_pred]
     else:
         betas, expression = None, None
-        if sample_shape:
-            betas = torch.randn([1, model.num_betas], dtype=torch.float32)
-        if sample_expression:
-            expression = torch.randn(
-                [1, model.num_expression_coeffs], dtype=torch.float32)
+        betas = torch.zeros((1, model.num_betas))
+        expression = torch.zeros((1, model.num_expression_coeffs))
+        # if sample_shape:
+        #     betas = torch.randn([1, model.num_betas], dtype=torch.float32)
+        # if sample_expression:
+        #     expression = torch.randn(
+        #         [1, model.num_expression_coeffs], dtype=torch.float32)
 
-        output = model(betas=betas, expression=expression,
-                   return_verts=True, plot_joints=True)
-        output = [output]
+        deg = 90
+        rad = np.deg2rad(deg)
+
+        global_orient = torch.zeros((1, 3))
+        body_pose = torch.zeros((1, 21, 3))
+        transl = torch.zeros((1, 3))
+        output1 = model(
+            betas=betas.clone(),
+            expression=expression.clone(),
+            body_pose=body_pose.clone(),
+            global_orient=global_orient.clone(),
+            transl=transl.clone(),
+            return_verts=True,
+            plot_joints=True,
+        )
+
+        # transl = torch.tensor([[0, 1, 0]])
+        # global_orient = torch.Tensor([[0, 0, 1]])
+        # global_orient = global_orient / magnitude(global_orient)
+        # global_orient *= rad
+
+        test_list = [
+            # (20, 18),
+            # (19, 18),
+            # (3, 0),
+            # (4, 1),
+            # (8, ...)
+        ]
+        axis = torch.Tensor([1, 0, 0])
+        for idx, _ in test_list:
+            body_pose[:, idx] = axis
+        mag = magnitude(body_pose)
+        mag_safe = torch.where(mag == 0, torch.tensor(1e-10), mag.clone())
+        body_pose = body_pose / mag_safe
+        body_pose *= rad
+
+        output2 = model(
+            betas=betas.clone(),
+            expression=expression.clone(),
+            body_pose=body_pose.clone(),
+            global_orient=global_orient.clone(),
+            transl=transl.clone(),
+            return_verts=True,
+            plot_joints=True,
+        )
+        # print("body joints", output2.joints[:, :22] == output1.joints[:, :22])
+        # print("hand joints", output2.joints[:, 26:55] == output1.joints[:, 26:55])
+
+        # print("right_hand_pose", output2.right_hand_pose == output1.right_hand_pose)
+        # print("left_hand_pose", output2.left_hand_pose == output1.left_hand_pose)
+
+        joints = output2.joints[:, :22].detach().clone()
+        # joints -= output1.joints[:, :22].detach().clone()
+        pelvis = joints[:, 0].clone()
+        joints -= pelvis
+
+        # # angles = torch.zeros((1, 21, 1))
+        angles = magnitude(output2.body_pose.detach().clone())
+
+        # vec = torch.zeros((1, 21, 3))
+        joints_old = (output1.joints[:, 1:22] - output1.joints[:, 0]).detach().clone()
+        vec = joints[:, 1:].clone()
+        vec = torch.cross(joints_old, vec, dim=-1)
+        vec2 = torch.zeros((1, 21, 3))
+        # for idx, parent in test_list:
+        #     vec[:, idx] = joints[:, idx] - joints[:, parent]
+        nkids = torch.zeros((1, 21, 1))
+        for parent, kid in Fit3DOrder26P._kinematic_tree:
+            if kid > 21 or parent == 0:
+                continue
+            # if parent == 9 and kid in [14, 13]:
+            #     continue
+            print(f"{parent=} {kid=}")
+            # vec[:, parent-1] -= joints[:, kid-1]
+            vec2[:, parent-1] += vec[:, kid-1]
+            nkids[:, parent-1] += 1
+
+        nkids = torch.where(nkids == 0, 1, nkids)
+        vec2 = vec2 / nkids
+
+        vec = vec2.clone()
+
+        # vec = torch.cross(joints_old, vec, dim=-1)
+
+        mag = magnitude(vec)
+        mag_safe = torch.where(mag == 0, torch.tensor(1e-10), mag)
+        vec = vec / mag_safe
+        # vec *= angles
+
+        K = torch.Tensor(
+            [[0, -1, 1], [1, 0, -1], [-1, 1, 0]]
+        ).unsqueeze(0).unsqueeze(0).repeat(1, vec.shape[1], 1, 1)
+        K[:, :, 2, 1] *= vec[:, :, 0]
+        K[:, :, 1, 2] *= vec[:, :, 0]
+        K[:, :, 2, 0] *= vec[:, :, 1]
+        K[:, :, 0, 2] *= vec[:, :, 1]
+        K[:, :, 1, 0] *= vec[:, :, 2]
+        K[:, :, 0, 1] *= vec[:, :, 2]
+
+        I = torch.eye(3).unsqueeze(0).unsqueeze(0).repeat(1, vec.shape[1], 1, 1)
+        angles_sin = torch.sin(angles.unsqueeze(-1))
+        angles_cos = 1 - torch.cos(angles.unsqueeze(-1))
+        R = I + angles_sin * K + angles_cos * (K @ K)
+
+        vec = transforms.matrix_to_axis_angle(R)
+        vec = vec.type(torch.float32)
+        print(f"{vec=}")
+        # # vec, origins = calc_vector(output2.joints[:, :22].squeeze().detach().numpy())
+        # # vec[2, [0, 1]] *= 0
+        # # vec[2, [2]] *= -1
+        # # unit_aa = form_unit_axis_angle(vec, angles)[np.newaxis, 1:]
+
+        output3 = model(betas=betas.clone(),
+                        expression=expression.clone(),
+                        global_orient=global_orient.clone(),
+                        body_pose=vec.clone(),
+                        return_verts=True, plot_joints=True)
+        print("body joints", output2.joints[:, :22] == output3.joints[:, :22])
+        print("body pose", output2.body_pose == output3.body_pose)
+        # output = [output1, output2]
+        # output = [output1, output2, output3]
+        output = [None, output2, output3]
+
 
     if plotting_module == 'pyrender':
         import pyrender
@@ -153,9 +325,11 @@ def main(model_folder,
         scene.add(camera, pose=cam_pose)
         scene.add(light, pose=cam_pose)
 
-        name = ["Ground Truth", "Predict"]
-        colors = [[50, 245, 39, 0.5], [245, 39, 243, 0.5]]
+        name = ["Ground Truth", "Predict", "Predict Reconstruct"]
+        colors = [[50, 245, 39, 0.5], [245, 39, 243, 0.5], [255,215,0, 0.5]]
         for idx, out in enumerate(output):
+            if not out:
+                continue
             if len(output) > 1:
                 print(f"{idx=} {name[idx]}")
 
@@ -177,9 +351,9 @@ def main(model_folder,
                 sm = trimesh.creation.uv_sphere(radius=0.009)
                 vertex_colors[-1] = 1.0
                 sm.visual.vertex_colors = vertex_colors
-                tfs = np.tile(np.eye(4), (26, 1, 1))
-                tfs[:22, :3, 3] = joints[:22]
-                tfs[22:, :3, 3] = joints[[27, 42, 33, 48]]
+                tfs = np.tile(np.eye(4), (Fit3DOrder26P._num_joints, 1, 1))
+                tfs[:22, :3, 3] = joints[Fit3DOrder26P._body_smplx]
+                tfs[22:, :3, 3] = joints[Fit3DOrder26P._fingers_smplx]
                 joints_pcl = pyrender.Mesh.from_trimesh(sm, poses=tfs)
                 scene.add(joints_pcl)
 
@@ -264,6 +438,7 @@ if __name__ == '__main__':
 
     parser.add_argument("--extract", type=str,)
     parser.add_argument("--rot-fp", type=str,)
+    parser.add_argument("--flip-gt", action='store_true')
 
     args = parser.parse_args()
 
@@ -282,6 +457,7 @@ if __name__ == '__main__':
     sample_expression = args.sample_expression
     extract = args.extract
     rot_fp = args.rot_fp
+    flip_gt = args.flip_gt
 
     main(model_folder, model_type, ext=ext,
          gender=gender, plot_joints=plot_joints,
@@ -293,4 +469,5 @@ if __name__ == '__main__':
          use_face_contour=use_face_contour,
          extract=extract,
          rot_fp=rot_fp,
+         flip_gt=flip_gt,
          )
