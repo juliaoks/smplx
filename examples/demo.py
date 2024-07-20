@@ -166,7 +166,7 @@ def main(model_folder,
         #     expression = torch.randn(
         #         [1, model.num_expression_coeffs], dtype=torch.float32)
 
-        deg = 90
+        deg = 20
         rad = np.deg2rad(deg)
 
         global_orient = torch.zeros((1, 3))
@@ -182,22 +182,86 @@ def main(model_folder,
             plot_joints=True,
         )
 
+        def reconstruct_body_pose(joints_new, joints_old, angles) -> torch.Tensor:
+            bs = joints_old.shape[0]
+            assert joints_old.shape == joints_new.shape
+
+            pelvis_old = joints_old[:, 0].clone()
+            pelvis_new = joints_new[:, 0].clone()
+            joints_old -= pelvis_old
+            joints_new -= pelvis_new
+
+            children_new = [[] for _ in range(Fit3DOrder26P._num_joints)]
+            children_old = [[] for _ in range(Fit3DOrder26P._num_joints)]
+            for parent, child in Fit3DOrder26P._kinematic_tree:
+                if child > 21:
+                    break
+                children_new[parent].append(joints_new[:, child].clone())
+                children_old[parent].append(joints_old[:, child].clone())
+
+            def stack_vec(vectors):
+                out = []
+                for vs in vectors:
+                    if len(vs) > 1:
+                        out.append(torch.stack(vs, -1))
+                    elif len(vs) == 1:
+                        out.append(vs[0])
+                    else:
+                        out.append(None)
+                return out
+
+            P_old = stack_vec(children_old)
+            P_new = stack_vec(children_new)
+            P_old_t = [torch.transpose(p, dim0=-2, dim1=-1) if isinstance(p, torch.Tensor) else p for p in P_old]
+
+            rot_axis = []
+            for idx, (po, po_t, pn) in enumerate(zip(P_old, P_old_t, P_new)):
+                if po is None:
+                    no_axis = torch.zeros((bs, 3))
+                    rot_axis.append(no_axis)
+                elif len(po.shape) == 3:
+                    H = pn @ po_t
+                    u, s, v = torch.svd(H)
+                    vt = torch.transpose(v, -2, -1)
+                    r = torch.matmul(u, vt)
+                    trace_r = torch.einsum("...ii", r)
+                    theta = torch.acos((trace_r - 1) / 2)
+                    u = torch.zeros(bs, 3)
+                    u[:, 0] = r[:, 2, 1] - r[:, 1, 2]
+                    u[:, 1] = r[:, 0, 2] - r[:, 2, 0]
+                    u[:, 2] = r[:, 1, 0] - r[:, 0, 1]
+                    u *= 1 / (2 * torch.sin(theta))
+                    rot_axis.append(u)
+                else:
+                    u = torch.cross(po, pn, dim=-1)
+                    u = u / torch.linalg.vector_norm(u, ord=2, dim=-1)
+                    rot_axis.append(u)
+
+            rot_axis = torch.stack(rot_axis, axis=1)
+            rot_axis = torch.nan_to_num(rot_axis)
+            rot_axis[:, 1:22] *= angles
+            return rot_axis
+
         # transl = torch.tensor([[0, 1, 0]])
         # global_orient = torch.Tensor([[0, 0, 1]])
         # global_orient = global_orient / magnitude(global_orient)
         # global_orient *= rad
 
         test_list = [
-            # (20, 18),
-            # (19, 18),
-            # (3, 0),
-            # (4, 1),
-            # (8, ...)
+            # Fit3DOrder26P.left_ankle,
+            # Fit3DOrder26P.right_ankle,
+            # Fit3DOrder26P.left_knee,
+            # Fit3DOrder26P.right_knee,
+            # Fit3DOrder26P.left_elbow,
+            # Fit3DOrder26P.right_elbow,
+            # Fit3DOrder26P.spine3,
+            # Fit3DOrder26P.spine2,
+            Fit3DOrder26P.spine1,
         ]
-        axis = torch.Tensor([1, 0, 0])
-        for idx, _ in test_list:
-            body_pose[:, idx] = axis
-        mag = magnitude(body_pose)
+        axis = torch.Tensor([1, 1, 1])
+        for idx in test_list:
+            body_pose[:, idx-1] = axis
+        mag = torch.linalg.vector_norm(body_pose, ord=2, dim=-1).unsqueeze(-1)
         mag_safe = torch.where(mag == 0, torch.tensor(1e-10), mag.clone())
         body_pose = body_pose / mag_safe
         body_pose *= rad
@@ -211,22 +275,44 @@ def main(model_folder,
             return_verts=True,
             plot_joints=True,
         )
+        print(f"{output2.body_pose=}")
         # print("body joints", output2.joints[:, :22] == output1.joints[:, :22])
         # print("hand joints", output2.joints[:, 26:55] == output1.joints[:, 26:55])
 
         # print("right_hand_pose", output2.right_hand_pose == output1.right_hand_pose)
         # print("left_hand_pose", output2.left_hand_pose == output1.left_hand_pose)
 
+        print(f"{output2.joints[:, :22] - output1.joints[:, :22]}")
+
         joints = output2.joints[:, :22].detach().clone()
         # joints -= output1.joints[:, :22].detach().clone()
         pelvis = joints[:, 0].clone()
         joints -= pelvis
+        # print(f"output2 pelvis rel {joints=}")
+        # for parent, kid in Fit3DOrder26P._kinematic_tree:
+        #     if kid > 21:
+        #         continue
+        #     joints[:, kid] = joints[:, kid] - joints[:, parent]
 
         # # angles = torch.zeros((1, 21, 1))
         angles = magnitude(output2.body_pose.detach().clone())
 
+        body_pose_new_rec = reconstruct_body_pose(
+            output2.joints[:, :22].detach().clone(),
+            output1.joints[:, :22].detach().clone(),
+            angles,
+        )
+        body_pose_2 = body_pose_new_rec[:, 1:22].clone()
+
         # vec = torch.zeros((1, 21, 3))
         joints_old = (output1.joints[:, 1:22] - output1.joints[:, 0]).detach().clone()
+        # joints_old = output1.joints[:, :22].detach().clone()
+        # for parent, kid in Fit3DOrder26P._kinematic_tree:
+        #     if kid > 21:
+        #         continue
+        #     joints_old[:, kid] = joints_old[:, kid] - joints_old[:, parent]
+        # joints_old = joints_old[:, 1:].clone()
+
         vec = joints[:, 1:].clone()
         vec = torch.cross(joints_old, vec, dim=-1)
         vec2 = torch.zeros((1, 21, 3))
@@ -238,7 +324,7 @@ def main(model_folder,
                 continue
             # if parent == 9 and kid in [14, 13]:
             #     continue
-            print(f"{parent=} {kid=}")
+            # print(f"{parent=} {kid=}")
             # vec[:, parent-1] -= joints[:, kid-1]
             vec2[:, parent-1] += vec[:, kid-1]
             nkids[:, parent-1] += 1
@@ -272,7 +358,7 @@ def main(model_folder,
 
         vec = transforms.matrix_to_axis_angle(R)
         vec = vec.type(torch.float32)
-        print(f"{vec=}")
+        # print(f"{vec=}")
         # # vec, origins = calc_vector(output2.joints[:, :22].squeeze().detach().numpy())
         # # vec[2, [0, 1]] *= 0
         # # vec[2, [2]] *= -1
@@ -283,11 +369,21 @@ def main(model_folder,
                         global_orient=global_orient.clone(),
                         body_pose=vec.clone(),
                         return_verts=True, plot_joints=True)
-        print("body joints", output2.joints[:, :22] == output3.joints[:, :22])
-        print("body pose", output2.body_pose == output3.body_pose)
+        print(f"{output3.body_pose=}")
+        output4 = model(betas=betas.clone(),
+                        expression=expression.clone(),
+                        global_orient=global_orient.clone(),
+                        body_pose=body_pose_2.clone(),
+                        return_verts=True, plot_joints=True)
+        print(f"{output4.body_pose=}")
+        # print(f"{output2.joints[:, :22] - output1.joints[:, :22]}")
+        # print(f"{output3.joints[:, :22] - output1.joints[:, :22]}")
+        # print(f"{output4.joints[:, :22] - output1.joints[:, :22]}")
+        # print("body joints", output2.joints[:, :22] == output3.joints[:, :22])
+        # print("body pose", output2.body_pose == output3.body_pose)
         # output = [output1, output2]
         # output = [output1, output2, output3]
-        output = [None, output2, output3]
+        output = [output2, output3, output4]
 
 
     if plotting_module == 'pyrender':
